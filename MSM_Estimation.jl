@@ -9,31 +9,83 @@ using LinearAlgebra
 using BenchmarkTools
 using Bits
 using LoopVectorization
-data = vec(Array(DataFrame(CSV.File("data.csv"))));
+using Optim
+using Statistics
+da = vec(Array(DataFrame(CSV.File("data.csv"))));
 
-kbar=3;
+k = 3;
+
+
+
 
 function estimate(
-    msm::MSMStructure,
-
+    data,
+    kbar
 )
-    @btime likelihood(input,kbar,data)
+    if typeof(y) <: Void
+        θ₀ = gridsearch(ret,k)
+    else
+        if (θ₀[1] < 1)
+            error("b must be greater than 1")
+        end
+        if (θ₀[2] < 1) || (θ₀[2] > 1.99)
+            error("m0 must be between (1,1.99]")
+        end
+        if (θ₀[3] < 0.00001) || (θ₀[3] > 0.99999)
+            error("gamma_k be between [0,1]")
+        end
+        if (θ₀[4] < 0.00001)
+            error("sigma must be a positive (non-zero) number")
+        end
+        if (θ₀[4] > 1)
+            warning("Sigma value is very large - consider using smaller value")
+        end
+    end
+
+    make_closures(data,kbar) = θ₀ -> likelihood(θ₀,data,kbar)
+    nll = make_closures(data,kbar)
+    lower = [1.0, 1.0, 0.001, 0.0001];
+    upper = [50.0, 1.99, 0.99999, 5.0];
+    result = optimize(nll,lower,upper,θ₀,Fminbox(LBFGS())); 
+    return Optim.minimizer(result)
 end
 
+function gridsearch(data,kbar)
+    
+    index = 1;
+    σ = std(data)*sqrt(252);
+    output = Vector{Vector{Float64}}(undef,84)
+    ll = Vector{Float64}(undef,84)
+    @views @inbounds for b in [1.5, 3.0, 6.0, 20.0]        
+            for γₖ in [0.1, 0.5, 0.9]
+                for m0 in 1.2:0.1:1.8
+                    input = [b,m0,γₖ,σ];
+                    tmp = likelihood(input,data,kbar)
+                    output[index] = input;
+                    ll[index] = tmp;
+                    index=index+1;
+                end
+            end
+        end
+    return output[findmin(ll)[2]]
+end
 
 function likelihood(
     input,
-    kbar::Int64,
     data,
+    kbar::Int64,
 )
-    
-    σ = input[4]/sqrt(252);
+    b = input[1] |> copy
+    m0 = input[2] |> copy
+    γₖ = input[3] |> copy
+    σ = input[4]/sqrt(252)
+
     kbar2 = 2^kbar;
     T = size(data,1);                       
 
-    A = transition_mat(input,kbar,kbar2); # Compute state transition matrix
+    A = transition_mat(γₖ,b,kbar,kbar2); # Compute state transition matrix
     g_m = ones(kbar2) #Vector{Float64}(undef,kbar2)
-    gofm(g_m,input,kbar); # Compute all possible states 
+    gofm(g_m,m0,kbar); # Compute all possible states 
     wt = Matrix{Float64}(undef,kbar2,T);
     get_weights!(wt,data,g_m,σ);
     
@@ -72,19 +124,19 @@ function get_weights!(
     σ,
 )
     pa = (2.0*pi)^-0.5;
-    @views @inbounds @fastmath for i in axes(wt,2)
+    @views @inbounds for i in axes(wt,2)
         for j in axes(wt,1)
             wt[j,i] = pa*exp(- 0.5*( (data[i]/(σ*g_m[j]))^2 ))/(σ*g_m[j]) + 1e-16;
         end
     end
 end
 
-function transition_mat(input,kbar::Int64,kbar2::Int64)
+function transition_mat(γₖ,b,kbar::Int64,kbar2::Int64)
     A = zeros((kbar2),(kbar2));
     transmat_template(A,kbar);
     
     gamma = Matrix{Float64}(undef,2,kbar);                          
-    get_gammas!(gamma,input,kbar,) 
+    get_gammas!(gamma,γₖ,b,kbar,) 
 
     prob = ones(kbar2);    
     get_probs!(prob,gamma,kbar)
@@ -103,17 +155,18 @@ end
 
 function get_gammas!(
     γ,
-    input,
+    γₖ,
+    b,
     kbar,
 )
     
     @views @inbounds for i in axes(γ,2)
         if i == 1
-            γ[1,1] = 1.0-(1.0-input[3])^(1.0/(input[1]^(kbar-1)));
-            γ[2,1] = (1.0-(1.0-input[3])^(1.0/(input[1]^(kbar-1))))*0.5;
+            γ[1,1] = 1.0-(1.0-γₖ)^(1.0/(b^(kbar-1)));
+            γ[2,1] = (1.0-(1.0-γₖ)^(1.0/(b^(kbar-1))))*0.5;
         else
-            γ[1,i] = 1.0-(1.0-(1.0-γ[1,1])^(input[1]^(i-1)))*0.5;
-            γ[2,i] = (1.0-(1.0-γ[1,1])^(input[1]^(i-1)))*0.5;
+            γ[1,i] = 1.0-(1.0-(1.0-γ[1,1])^(b^(i-1)))*0.5;
+            γ[2,i] = (1.0-(1.0-γ[1,1])^(b^(i-1)))*0.5;
         end
     end
     γ[1,1] *= (-0.5);
@@ -152,16 +205,17 @@ function get_transmat!(
     end 
 end
 
-function gofm(g_m,input,kbar)
+function gofm(g_m,m0,kbar)
     @views @inbounds for i in eachindex(g_m)
+       g = 1.0
         for j in 0:(kbar-1)       
-            if i-1 == 2^j   
-                g_m[i] *= (2.0 - input[2]);
+            if ((i-1) & (2^j)) != 0   
+                g *= (2.0 - m0);
             else 
-                g_m[i] *= input[2];
+                g *= m0;
             end
         end
-        g_m[i] ^= 0.5;
+        g_m[i] = sqrt(g);
     end
 end
 
