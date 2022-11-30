@@ -1,56 +1,58 @@
 
-using MKL
-using DelimitedFiles 
-using DataFrames
-using CSV
-using Dates
-using TimeSeries
-using LinearAlgebra 
-using BenchmarkTools
-using Bits
-using LoopVectorization
-using Optim
-using Statistics
-da = vec(Array(DataFrame(CSV.File("data.csv"))));
-
-k = 3;
-
-
-
-
 function estimate(
     data,
-    kbar
+    kbar::Int64
 )
-    if typeof(y) <: Void
-        θ₀ = gridsearch(ret,k)
-    else
-        if (θ₀[1] < 1)
-            error("b must be greater than 1")
-        end
-        if (θ₀[2] < 1) || (θ₀[2] > 1.99)
-            error("m0 must be between (1,1.99]")
-        end
-        if (θ₀[3] < 0.00001) || (θ₀[3] > 0.99999)
-            error("gamma_k be between [0,1]")
-        end
-        if (θ₀[4] < 0.00001)
-            error("sigma must be a positive (non-zero) number")
-        end
-        if (θ₀[4] > 1)
-            warning("Sigma value is very large - consider using smaller value")
-        end
-    end
+    θ₀ = gridsearch(data,kbar)
 
-    make_closures(data,kbar) = θ₀ -> likelihood(θ₀,data,kbar)
-    nll = make_closures(data,kbar)
-    lower = [1.0, 1.0, 0.001, 0.0001];
-    upper = [50.0, 1.99, 0.99999, 5.0];
-    result = optimize(nll,lower,upper,θ₀,Fminbox(LBFGS())); 
+    
+    lower = [1.0, 1.0, 0.001, 0.0001]; 
+    upper = [50.0, 1.99, 0.99999, 5.0];make_closures(data,kbar) = θ₀ -> likelihood(θ₀,data,kbar);
+    nll = make_closures(data,kbar)   
+    #df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    #dfc = TwiceDifferentiableConstraints(lower, upper)
+    #@btime  result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
+    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
+
     return Optim.minimizer(result)
 end
 
-function gridsearch(data,kbar)
+function estimate(
+    data,
+    kbar::Int64,
+    θ₀::Vector{Float64}
+)
+    if (θ₀[1] < 1)
+        error("b must be greater than 1")
+    end
+    if (θ₀[2] < 1) || (θ₀[2] > 1.99)
+        error("m0 must be between (1,1.99]")
+    end
+    if (θ₀[3] < 0.00001) || (θ₀[3] > 0.99999)
+        error("gamma_k be between [0,1]")
+    end
+    if (θ₀[4] < 0.00001)
+        error("sigma must be a positive (non-zero) number")
+    end
+    if (θ₀[4] > 1)
+        println("Sigma value is very large - consider using smaller value")
+    end
+
+    make_closures(data,kbar) = θ₀ -> likelihood(θ₀,data,kbar);
+    nll = make_closures(data,kbar)
+    lower = [1.0, 1.0, 0.001, 0.0001]; 
+    upper = [50.0, 1.99, 0.99999, 5.0];   
+    #df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    #dfc = TwiceDifferentiableConstraints(lx, ux)
+    #result = optimize(df,dfc,θ₀,IPNewton()); 
+    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
+
+    return Optim.minimizer(result)
+end
+
+function gridsearch(data,kbar::Int64)
     
     index = 1;
     σ = std(data)*sqrt(252);
@@ -71,10 +73,11 @@ function gridsearch(data,kbar)
 end
 
 function likelihood(
-    input,
+    input::AbstractVector{T},
     data,
     kbar::Int64,
-)
+) where {N <: Real} 
+
     b = input[1] |> copy
     m0 = input[2] |> copy
     γₖ = input[3] |> copy
@@ -84,28 +87,29 @@ function likelihood(
     T = size(data,1);                       
 
     A = transition_mat(γₖ,b,kbar,kbar2); # Compute state transition matrix
-    g_m = ones(kbar2) #Vector{Float64}(undef,kbar2)
+    g_m = ones(N,kbar2) #Vector{Float64}(undef,kbar2)
     gofm(g_m,m0,kbar); # Compute all possible states 
-    wt = Matrix{Float64}(undef,kbar2,T);
+    wt = Matrix{N}(undef,kbar2,T);
     get_weights!(wt,data,g_m,σ);
     
-    pi_mat = Matrix{Float64}(undef,kbar2,T+1);     
+    pi_mat = Matrix{N}(undef,kbar2,T+1);     
     pi_mat[:,1] .= (1/kbar2);
     ll = get_loglik!(pi_mat,A,wt)
     return -ll
 end
 
 function get_loglik!(
-    pi_mat,
-    A,
-    wt,
-)
-    ll = 0.0;
-    piA = similar(wt[:,1])
+    pi_mat::AbstractMatrix{N},
+    A::AbstractMatrix{N},
+    wt::AbstractMatrix{N},
+) where {N <: Real} 
+
+    ll = zero(N);
+    piA = zeros(N,size(wt,1));
     @views @inbounds for t in axes(wt,2)          
         mul!(piA,A,pi_mat[:,t]);
         pi_mat[:,t+1] .= wt[:,t].*piA; 
-        ft = sum_tturbo(pi_mat[:,t+1]);
+        ft = sum(pi_mat[:,t+1]);
         if ft == 0                    
             pi_mat[1,t+1] = 1.0;   
         else
@@ -118,11 +122,12 @@ function get_loglik!(
 end
 
 function get_weights!(
-    wt,
+    wt::AbstractMatrix{N},
     data,
-    g_m,
-    σ,
-)
+    g_m::AbstractVector{N},
+    σ::N,
+) where {N <: Real} 
+
     pa = (2.0*pi)^-0.5;
     @views @inbounds for i in axes(wt,2)
         for j in axes(wt,1)
@@ -131,20 +136,29 @@ function get_weights!(
     end
 end
 
-function transition_mat(γₖ,b,kbar::Int64,kbar2::Int64)
-    A = zeros((kbar2),(kbar2));
+function transition_mat(
+    γₖ::N,
+    b::N,
+    kbar::Int64,
+    kbar2::Int64
+) where {N <: Real} 
+
+    A = zeros(N,kbar2,kbar2);
     transmat_template(A,kbar);
     
-    gamma = Matrix{Float64}(undef,2,kbar);                          
-    get_gammas!(gamma,γₖ,b,kbar,) 
+    γ = Matrix{N}(undef,2,kbar);                          
+    get_gammas!(γ,γₖ,b,kbar) 
 
-    prob = ones(kbar2);    
-    get_probs!(prob,gamma,kbar)
+    prob = ones(N,kbar2);    
+    get_probs!(prob,γ,kbar)
     get_transmat!(A,prob,kbar,kbar2)
     return A
 end
 
-function transmat_template(A::Matrix{Float64},kbar::Int64)  
+function transmat_template(
+    A::AbstractMatrix{N},
+    kbar::Int64
+) where {N <: Real}  
     @views @inbounds for i in 0:(2^kbar-1)       
         for j = i:(2^kbar-1)-i  
             A[i+1,j+1] = xor(i,j);
@@ -154,11 +168,11 @@ function transmat_template(A::Matrix{Float64},kbar::Int64)
 end
 
 function get_gammas!(
-    γ,
-    γₖ,
-    b,
-    kbar,
-)
+    γ::AbstractMatrix{N},
+    γₖ::N,
+    b::N,
+    kbar::Int64,
+) where {N <: Real} 
     
     @views @inbounds for i in axes(γ,2)
         if i == 1
@@ -174,23 +188,24 @@ function get_gammas!(
 end
 
 function get_probs!(
-    prob,
-    gamma,
-    kbar,
-)
+    prob::AbstractVector{N},
+    γ::AbstractMatrix{N},
+    kbar::Int64,
+) where {N <: Real} 
+
     @views @inbounds @fastmath for i in eachindex(prob)   
         for m = 1:kbar  
-            prob[i] *= gamma[(bit(i-1,m)+1),kbar+1-m];
+            prob[i] *= γ[(bit(i-1,m)+1),kbar+1-m];
         end
     end
 end
 
 function get_transmat!(
-    A,
-    prob,
-    kbar,
-    kbar2,
-)
+    A::AbstractMatrix{N},
+    prob::AbstractVector{N},
+    kbar::Int64,
+    kbar2::Int64,
+) where {N <: Real} 
     @views @inbounds for i in 0:2^(kbar-1)-1 
         for j in i:(2^(kbar-1)-1)  
             A[kbar2-i,j+1] = prob[kbar2-Int(A[i+1,j+1])]; 
@@ -205,7 +220,11 @@ function get_transmat!(
     end 
 end
 
-function gofm(g_m,m0,kbar)
+function gofm(
+    g_m::AbstractVector{N},
+    m0::N,
+    kbar::Int64
+) where {N <: Real} 
     @views @inbounds for i in eachindex(g_m)
        g = 1.0
         for j in 0:(kbar-1)       
@@ -231,7 +250,7 @@ end
 
 function dot_tturbo(a::AbstractArray{T}, b::AbstractArray{T}) where {T <: Real}
     s = zero(T)
-    @tturbo for i ∈ eachindex(a,b)
+    @inbounds @fastmath for i ∈ eachindex(a,b)
         s += a[i] * b[i]
     end
     s
