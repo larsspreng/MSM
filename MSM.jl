@@ -16,6 +16,6 @@ using FiniteDifferences
 using NLSolversBase
 
 include("MSM_Estimation.jl")
-include("MSM_Prediction.jl")
+include("MSM_prediction.jl")
 
 end

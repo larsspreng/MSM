@@ -1,14 +1,15 @@
-
 function estimate(
     data,
-    kbar::Int64
+    kbar::Int64,
+    n::Int64
 )
-    θ₀ = gridsearch(data,kbar)
+    θ₀ = gridsearch(data,kbar,n)
 
     
     lower = [1.0, 1.0, 0.001, 0.0001]; 
-    upper = [50.0, 1.99, 0.99999, 5.0];make_closures(data,kbar) = θ₀ -> likelihood(θ₀,data,kbar);
-    nll = make_closures(data,kbar)   
+    upper = [50.0, 1.99, 0.99999, 5.0];
+    make_closures(data,kbar,n) = θ₀ -> likelihood(θ₀,data,kbar,n);
+    nll = make_closures(data,kbar,n)   
     #df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
     #dfc = TwiceDifferentiableConstraints(lower, upper)
     #@btime  result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
@@ -21,6 +22,7 @@ end
 function estimate(
     data,
     kbar::Int64,
+    n::Int64,
     θ₀::Vector{Float64}
 )
     if (θ₀[1] < 1)
@@ -39,8 +41,8 @@ function estimate(
         println("Sigma value is very large - consider using smaller value")
     end
 
-    make_closures(data,kbar) = θ₀ -> likelihood(θ₀,data,kbar);
-    nll = make_closures(data,kbar)
+    make_closures(data,kbar,n) = θ₀ -> likelihood(θ₀,data,kbar,n);
+    nll = make_closures(data,kbar,n)
     lower = [1.0, 1.0, 0.001, 0.0001]; 
     upper = [50.0, 1.99, 0.99999, 5.0];   
     #df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
@@ -52,17 +54,17 @@ function estimate(
     return Optim.minimizer(result)
 end
 
-function gridsearch(data,kbar::Int64)
+function gridsearch(data,kbar::Int64,n::Int64)
     
     index = 1;
-    σ = std(data)*sqrt(252);
+    σ = std(data)*sqrt(252/n);
     output = Vector{Vector{Float64}}(undef,84)
     ll = Vector{Float64}(undef,84)
     @views @inbounds for b in [1.5, 3.0, 6.0, 20.0]        
             for γₖ in [0.1, 0.5, 0.9]
                 for m0 in 1.2:0.1:1.8
                     input = [b,m0,γₖ,σ];
-                    tmp = likelihood(input,data,kbar)
+                    tmp = likelihood(input,data,kbar,n)
                     output[index] = input;
                     ll[index] = tmp;
                     index=index+1;
@@ -73,15 +75,16 @@ function gridsearch(data,kbar::Int64)
 end
 
 function likelihood(
-    input::AbstractVector{T},
+    input::AbstractVector{N},
     data,
     kbar::Int64,
+    n::Int64
 ) where {N <: Real} 
 
     b = input[1] |> copy
     m0 = input[2] |> copy
     γₖ = input[3] |> copy
-    σ = input[4]/sqrt(252)
+    σ = input[4]/sqrt(252/n)
 
     kbar2 = 2^kbar;
     T = size(data,1);                       
@@ -254,4 +257,146 @@ function dot_tturbo(a::AbstractArray{T}, b::AbstractArray{T}) where {T <: Real}
         s += a[i] * b[i]
     end
     s
+end
+
+function arma_estimate(
+    data,
+    kbar::Int64,
+    n::Int64
+)
+    θ₀ = arma_gridsearch(data,kbar,n)
+
+    lower = [-50.0, -1.0, -1.0, 1.0, 1.0, 0.001, 0.0001]; 
+    upper = [50.0, 1.0, 1.0, 50.0, 1.99, 0.99999, 5.0];
+    θ₀[:] .= max.(θ₀, lower.+0.001)
+    θ₀[:] .= min.(θ₀, upper.-0.001)
+
+    make_closures(data,kbar,n) = θ₀ -> arma_likelihood(θ₀,data,kbar,n);
+    nll = make_closures(data,kbar,n)   
+    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    dfc = TwiceDifferentiableConstraints(lower, upper)
+    result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
+    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
+
+    return Optim.minimizer(result)
+end
+
+function arma_estimate(
+    data,
+    kbar::Int64,
+    n::Int64,
+    θ₀::Vector{Float64}
+)
+
+    lower = [-50.0, -1.0, -1.0, 1.0, 1.0, 0.001, 0.0001]; 
+    upper = [50.0, 1.0, 1.0, 50.0, 1.99, 0.99999, 5.0];
+    θ₀[:] .= max.(θ₀, lower.+0.001)
+    θ₀[:] .= min.(θ₀, upper.-0.001)
+    if (abs(θ₀[1]) > 1)
+        println("AR constant is very large - consider using smaller value")
+    end
+    if (abs(θ₀[2]) > 1)
+        error("AR coefficient must be smaller than 1")
+    end
+    if (abs(θ₀[3]) > 1)
+        println("MA coefficient is very large - consider smaller value")
+    end
+    if (θ₀[4] < 1)
+        error("b is "*string(θ₀[4])*" but must be greater than 1")
+    end
+    if (θ₀[5] < 1) || (θ₀[5] > 1.99)
+        error("m0 is "*string(θ₀[5])*" but must be between (1,1.99]")
+    end
+    if (θ₀[6] < 0.00001) || (θ₀[6] > 0.99999)
+        error("gamma_k is "*string(θ₀[6])*" but must be between [0,1]")
+    end
+    if (θ₀[7] < 0.00001)
+        error("sigma is "*string(θ₀[7])*" but must be a positive (non-zero) number")
+    end
+    if (θ₀[7] > 1)
+        println("Sigma value is very large - consider using smaller value")
+    end
+
+    make_closures(data,kbar,n) = θ₀ -> arma_likelihood(θ₀,data,kbar,n);
+    nll = make_closures(data,kbar,n)   
+    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    dfc = TwiceDifferentiableConstraints(lower, upper)
+    result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
+    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
+
+    return Optim.minimizer(result)
+end
+
+function arma_gridsearch(data,kbar::Int64,n::Int64)
+    
+    index = 1;
+    σ = std(data)*sqrt(252/n);
+    output = Vector{Vector{Float64}}(undef,84)
+    β = data[1:end-1] \ data[2:end]
+    ll = Vector{Float64}(undef,84)
+    @views @inbounds for b in [1.5, 3.0, 6.0, 20.0]        
+                    for γₖ in [0.1, 0.5, 0.9]
+                        for m0 in 1.2:0.1:1.8
+                            input = [0.0,β,0.0,b,m0,γₖ,σ];
+                            tmp = arma_likelihood(input,data,kbar,n)
+                            output[index] = input;
+                            ll[index] = tmp;
+                            index=index+1;
+                        end
+                    end
+                end
+    return output[findmin(ll)[2]]
+end
+
+function arma_likelihood(
+    input::AbstractVector{N},
+    data,
+    kbar::Int64,
+    n::Int64
+) where {N <: Real} 
+
+    T = size(data,1);
+    c = input[1] |> copy
+    β = input[2] |> copy
+    ϕ = input[3] |> copy
+    b = input[4] |> copy
+    m0 = input[5] |> copy
+    γₖ = input[6] |> copy
+    σ = input[7]/sqrt(252/n)
+
+    μ = zeros(N,T)
+    kbar2 = 2^kbar;   
+    
+    arma(μ,c,β,ϕ,data)
+    ret = data .- μ
+
+    A = transition_mat(γₖ,b,kbar,kbar2); # Compute state transition matrix
+    g_m = ones(N,kbar2) #Vector{Float64}(undef,kbar2)
+    gofm(g_m,m0,kbar); # Compute all possible states 
+    wt = Matrix{N}(undef,kbar2,T);
+    get_weights!(wt,ret,g_m,σ);
+    
+    pi_mat = Matrix{N}(undef,kbar2,T+1);     
+    pi_mat[:,1] .= (1/kbar2);
+    ll = get_loglik!(pi_mat,A,wt)
+    
+    return -ll
+end
+
+
+function arma(
+    μ::AbstractVector{N},
+    c::N,
+    β::N,
+    ϕ::N,
+    data,
+) where {N <: Real}    
+    @views @inbounds for t ∈ 2:length(data)
+        if t == 2
+            μ[t-1] = c 
+        end
+        μ[t] = c + β*data[t-1] + ϕ*(data[t-1] - μ[t-1]); 
+    end
 end
