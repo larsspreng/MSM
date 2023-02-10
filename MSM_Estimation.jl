@@ -1,3 +1,6 @@
+"""
+The functions below estimate the MSM model using a series of returns
+"""
 function estimate(
     data,
     kbar::Int64,
@@ -10,12 +13,12 @@ function estimate(
     upper = [50.0, 1.99, 0.99999, 5.0];
     make_closures(data,kbar,n) = θ₀ -> likelihood(θ₀,data,kbar,n);
     nll = make_closures(data,kbar,n)   
-    #df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
-    #dfc = TwiceDifferentiableConstraints(lower, upper)
-    #@btime  result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
-    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
-    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
-
+    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    dfc = TwiceDifferentiableConstraints(lower, upper)
+    result = optimize(df,dfc,θ₀,IPNewton()); 
+    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
+    
     return Optim.minimizer(result)
 end
 
@@ -43,13 +46,13 @@ function estimate(
 
     make_closures(data,kbar,n) = θ₀ -> likelihood(θ₀,data,kbar,n);
     nll = make_closures(data,kbar,n)
-    lower = [1.0, 1.0, 0.001, 0.0001]; 
+    lower = [1.001, 1.0, 0.001, 0.0001]; 
     upper = [50.0, 1.99, 0.99999, 5.0];   
-    #df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
-    #dfc = TwiceDifferentiableConstraints(lx, ux)
-    #result = optimize(df,dfc,θ₀,IPNewton()); 
-    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
-    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
+    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    dfc = TwiceDifferentiableConstraints(lower, upper)
+    result = optimize(df,dfc,θ₀,IPNewton()); 
+    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
 
     return Optim.minimizer(result)
 end
@@ -58,20 +61,32 @@ function gridsearch(data,kbar::Int64,n::Int64)
     
     index = 1;
     σ = std(data)*sqrt(252/n);
-    output = Vector{Vector{Float64}}(undef,84)
-    ll = Vector{Float64}(undef,84)
-    @views @inbounds for b in [1.5, 3.0, 6.0, 20.0]        
-            for γₖ in [0.1, 0.5, 0.9]
-                for m0 in 1.2:0.1:1.8
+    bvec = [1.5, 3.0, 6.0, 20.0]
+    γvec = [0.1, 0.5, 0.9]
+    #make_closures(b,γₖ,σ,data,kbar) = m0 -> likelihood(m0,b,γₖ,σ,data,kbar);
+    mvec = 1.2:0.1:1.8
+    np = length(bvec)*length(γvec)
+    output = Vector{Vector{Float64}}(undef,np)
+    ll = Vector{Float64}(undef,np)
+    @views @inbounds for b in bvec         
+            for γₖ in γvec
+                for m0 in mvec
                     input = [b,m0,γₖ,σ];
+                    # nll = make_closures(b,γₖ,σ,data,kbar) 
+                    # df = TwiceDifferentiable(nll, [1.5]; autodiff=:forward);
+                    # dfc = TwiceDifferentiableConstraints([1.0], [1.99]);
+                    # result = optimize(df,dfc,[1.5],IPNewton());
+                    # # df = OnceDifferentiable(nll, [1.5]; autodiff=:forward);
+                    # # result = optimize(df,[1.0], [1.99],[1.5],Fminbox(LBFGS()));
+                    # m0 = Optim.minimizer(result)
                     tmp = likelihood(input,data,kbar,n)
-                    output[index] = input;
-                    ll[index] = tmp;
+                    output[index] = input #[b,m0[1],γₖ,σ]; #
+                    ll[index] = -tmp; # -Optim.minimum(result); # 
                     index=index+1;
                 end
             end
         end
-    return output[findmin(ll)[2]]
+    return output[findmax(ll)[2]]
 end
 
 function likelihood(
@@ -90,7 +105,32 @@ function likelihood(
     T = size(data,1);                       
 
     A = transition_mat(γₖ,b,kbar,kbar2); # Compute state transition matrix
-    g_m = ones(N,kbar2) #Vector{Float64}(undef,kbar2)
+    g_m = ones(N,kbar2)
+    gofm(g_m,m0,kbar); # Compute all possible states 
+    wt = Matrix{N}(undef,kbar2,T);
+    get_weights!(wt,data,g_m,σ);
+    
+    pi_mat = Matrix{N}(undef,kbar2,T+1);     
+    pi_mat[:,1] .= (1/kbar2);
+    ll = get_loglik!(pi_mat,A,wt)
+    return -ll
+end
+
+function likelihood(
+    input::AbstractVector{N},
+    b,
+    γₖ,
+    σ,
+    data,
+    kbar::Int64,
+) where {N <: Real} 
+
+    m0 = input[1] |> copy
+    kbar2 = 2^kbar;
+    T = size(data,1);                       
+
+    A = transition_mat(γₖ,b,kbar,kbar2); # Compute state transition matrix
+    g_m = ones(N,kbar2)
     gofm(g_m,m0,kbar); # Compute all possible states 
     wt = Matrix{N}(undef,kbar2,T);
     get_weights!(wt,data,g_m,σ);
@@ -103,7 +143,7 @@ end
 
 function get_loglik!(
     pi_mat::AbstractMatrix{N},
-    A::AbstractMatrix{N},
+    A::AbstractMatrix,
     wt::AbstractMatrix{N},
 ) where {N <: Real} 
 
@@ -113,7 +153,7 @@ function get_loglik!(
         mul!(piA,A,pi_mat[:,t]);
         pi_mat[:,t+1] .= wt[:,t].*piA; 
         ft = sum(pi_mat[:,t+1]);
-        if ft == 0                    
+        if abs(ft) <= 1e-05                   
             pi_mat[1,t+1] = 1.0;   
         else
             pi_mat[:,t+1] ./= ft; 
@@ -128,10 +168,10 @@ function get_weights!(
     wt::AbstractMatrix{N},
     data,
     g_m::AbstractVector{N},
-    σ::N,
+    σ,
 ) where {N <: Real} 
 
-    pa = (2.0*pi)^-0.5;
+    pa = (2.0*pi)^(-0.5);
     @views @inbounds for i in axes(wt,2)
         for j in axes(wt,1)
             wt[j,i] = pa*exp(- 0.5*( (data[i]/(σ*g_m[j]))^2 ))/(σ*g_m[j]) + 1e-16;
@@ -149,12 +189,12 @@ function transition_mat(
     A = zeros(N,kbar2,kbar2);
     transmat_template(A,kbar);
     
-    γ = Matrix{N}(undef,2,kbar);                          
-    get_gammas!(γ,γₖ,b,kbar) 
+    γ = Matrix{N}(undef,2,kbar); 
+    get_gammas!(γ,γₖ,b,kbar);  
 
     prob = ones(N,kbar2);    
     get_probs!(prob,γ,kbar)
-    get_transmat!(A,prob,kbar,kbar2)
+    get_transmat!(A,prob)
     return A
 end
 
@@ -180,14 +220,14 @@ function get_gammas!(
     @views @inbounds for i in axes(γ,2)
         if i == 1
             γ[1,1] = 1.0-(1.0-γₖ)^(1.0/(b^(kbar-1)));
-            γ[2,1] = (1.0-(1.0-γₖ)^(1.0/(b^(kbar-1))))*0.5;
         else
-            γ[1,i] = 1.0-(1.0-(1.0-γ[1,1])^(b^(i-1)))*0.5;
-            γ[2,i] = (1.0-(1.0-γ[1,1])^(b^(i-1)))*0.5;
+            γ[1,i] = 1.0-(1.0-γ[1,1])^(b^(i-1));
         end
     end
-    γ[1,1] *= (-0.5);
-    γ[1,1] += 1.0
+    γ .*= 0.5;
+    γ[2,:] = γ[1,:];
+    γ[1,:] .-= 1.0
+    γ[1,:] .*= -1.0
 end
 
 function get_probs!(
@@ -198,7 +238,7 @@ function get_probs!(
 
     @views @inbounds @fastmath for i in eachindex(prob)   
         for m = 1:kbar  
-            prob[i] *= γ[(bit(i-1,m)+1),kbar+1-m];
+            prob[i] *= γ[(bit(i-1,m)+1), kbar+1-m];
         end
     end
 end
@@ -206,19 +246,11 @@ end
 function get_transmat!(
     A::AbstractMatrix{N},
     prob::AbstractVector{N},
-    kbar::Int64,
-    kbar2::Int64,
 ) where {N <: Real} 
-    @views @inbounds for i in 0:2^(kbar-1)-1 
-        for j in i:(2^(kbar-1)-1)  
-            A[kbar2-i,j+1] = prob[kbar2-Int(A[i+1,j+1])]; 
-            A[kbar2-j,i+1] = A[kbar2-i,j+1];
-            A[j+1,kbar2-i] = A[kbar2-i,j+1];
-            A[i+1,kbar2-j] = A[kbar2-i,j+1];    
-            A[i+1,j+1] = prob[Int(A[i+1,j+1]+1)];
-            A[j+1,i+1] = A[i+1,j+1];
-            A[kbar2-j,kbar2-i] = A[i+1,j+1];
-            A[kbar2-i,kbar2-j] = A[i+1,j+1];
+  
+    @views @inbounds for i in axes(A,1) 
+        for j in axes(A,2) 
+            A[i,j] = prob[((i-1) ⊻ (j-1)) + 1]; 
         end
     end 
 end
@@ -259,6 +291,9 @@ function dot_tturbo(a::AbstractArray{T}, b::AbstractArray{T}) where {T <: Real}
     s
 end
 
+"""
+    The functions below estimate the MSM model on the residuals of an ARMA(1,1) model fitted to the return series
+"""
 function arma_estimate(
     data,
     kbar::Int64,

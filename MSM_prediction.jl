@@ -1,6 +1,14 @@
 
+"""
+    arma_volatility(input,data,n,kbar;h=0,window="fixed",)
+
+    Function to compute volatility of ARMA(1,1) residuals of return series:
+    (a) in-sample volatility if h=0 and window = "fixed"
+    (b) volatility forecasts if h>0 either
+        - using a rolling window by setting window = "rolling"
+        - using a fixed window by setting window = "fixed"
+"""
 function arma_volatility(input,data,n,kbar;h=0,window="fixed",)
-    
 
     T = size(data,1);
     c = input[1] |> copy
@@ -36,6 +44,15 @@ function arma_volatility(input,data,n,kbar;h=0,window="fixed",)
     end 
 end
 
+"""
+    arma_returns(input,data,n,kbar;h=0,window="fixed",)
+
+    Function to compute volatility of return series:
+    (a) in-sample returns if h=0 and window = "fixed"
+    (b) return forecasts if h>0 either
+        - using a rolling window by setting window = "rolling"
+        - using a fixed window by setting window = "fixed"
+"""
 function arma_returns(input,data,n,kbar;h=0,window="fixed",)
 
     T = size(data,1);
@@ -48,14 +65,14 @@ function arma_returns(input,data,n,kbar;h=0,window="fixed",)
     σ = input[7]/sqrt(252/n)
 
     μ = zeros(T)
-    kbar2 = 2^kbar;   
+    #kbar2 = 2^kbar;   
     if h == 0
         arma(μ,c,β,ϕ,data)
         return data .- μ
     elseif h > 0
         if window == "rolling"
             arma(μ,c,β,ϕ,data)
-            ret = data .- μ
+            #ret = data .- μ
             return c + β*data[end] + ϕ*(data[end] - μ[end]);  # Predict returns
         elseif window == "fixed"  
             arma(μ,c,β,ϕ,data)
@@ -64,6 +81,15 @@ function arma_returns(input,data,n,kbar;h=0,window="fixed",)
     end
 end
 
+"""
+    volatility(input,data,n,kbar;h=0,window="fixed",)
+
+Function to:
+    (a) compute in-sample volatility if h=0 and window = "fixed"
+    (b) compute volatility forecasts if h>0 either
+        - using a rolling window by setting window = "rolling"
+        - using a fixed window by setting window = "fixed"
+"""
 function volatility(input,data,n,kbar;h=0,window="fixed",)
     
     b = input[1] |> copy
@@ -92,6 +118,19 @@ function volatility(input,data,n,kbar;h=0,window="fixed",)
     end 
 end
 
+"""
+    filterstates!(
+    vol,
+    pi_mat,
+    g_m,
+    A,
+    wt,
+    σ,
+    h
+)
+
+Function to compute states
+"""
 function filterstates!(
     vol,
     pi_mat,
@@ -119,6 +158,18 @@ function filterstates!(
     end
 end
 
+""" 
+    arma(
+    μ::AbstractVector{N},
+    c::N,
+    β::N,
+    ϕ::N,
+    data,
+    h::Int64,
+) where {N <: Real}
+
+Function to compute ARMA(1,1) process for mean of returns.
+"""
 function arma(
     μ::AbstractVector{N},
     c::N,
