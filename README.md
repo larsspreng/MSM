@@ -6,7 +6,7 @@ and the Estimation of Multifractal Processes. _Journal of Financial Econometrics
 The code can be used to run the module on a time-series of returns, as well as on the residuals of an ARMA(1,1) process. 
 
 ## Example
-load the module
+Load the module
 ```julia
 using MSM
 ```
