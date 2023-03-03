@@ -11,13 +11,15 @@ function estimate(
     
     lower = [1.0, 1.0, 0.001, 0.0001]; 
     upper = [50.0, 1.99, 0.99999, 5.0];
+    θ₀[:] .= max.(θ₀, lower.+0.001)
+    θ₀[:] .= min.(θ₀, upper.-0.001)
     make_closures(data,kbar,n) = θ₀ -> likelihood(θ₀,data,kbar,n);
     nll = make_closures(data,kbar,n)   
-    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
-    dfc = TwiceDifferentiableConstraints(lower, upper)
-    result = optimize(df,dfc,θ₀,IPNewton()); 
-    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
-    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
+    # df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    # dfc = TwiceDifferentiableConstraints(lower, upper)
+    # result = optimize(df,dfc,θ₀,IPNewton()); 
+    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
     
     return Optim.minimizer(result)
 end
@@ -47,12 +49,14 @@ function estimate(
     make_closures(data,kbar,n) = θ₀ -> likelihood(θ₀,data,kbar,n);
     nll = make_closures(data,kbar,n)
     lower = [1.001, 1.0, 0.001, 0.0001]; 
-    upper = [50.0, 1.99, 0.99999, 5.0];   
-    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
-    dfc = TwiceDifferentiableConstraints(lower, upper)
-    result = optimize(df,dfc,θ₀,IPNewton()); 
-    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
-    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
+    upper = [50.0, 1.99, 0.99999, 5.0];  
+    θ₀[:] .= max.(θ₀, lower.+0.001)
+    θ₀[:] .= min.(θ₀, upper.-0.001) 
+    # df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    # dfc = TwiceDifferentiableConstraints(lower, upper)
+    # result = optimize(df,dfc,θ₀,IPNewton()); 
+    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
 
     return Optim.minimizer(result)
 end
@@ -61,11 +65,11 @@ function gridsearch(data,kbar::Int64,n::Int64)
     
     index = 1;
     σ = std(data)*sqrt(252/n);
-    bvec = [1.5, 3.0, 6.0, 20.0]
+    bvec = [1.5, 6.0, 20.0, 40.0]
     γvec = [0.1, 0.5, 0.9]
     #make_closures(b,γₖ,σ,data,kbar) = m0 -> likelihood(m0,b,γₖ,σ,data,kbar);
     mvec = 1.2:0.1:1.8
-    np = length(bvec)*length(γvec)
+    np = length(bvec)*length(γvec)*length(mvec)
     output = Vector{Vector{Float64}}(undef,np)
     ll = Vector{Float64}(undef,np)
     @views @inbounds for b in bvec         
@@ -151,7 +155,7 @@ function get_loglik!(
     piA = zeros(N,size(wt,1));
     @views @inbounds for t in axes(wt,2)          
         mul!(piA,A,pi_mat[:,t]);
-        pi_mat[:,t+1] .= wt[:,t].*piA; 
+        pi_mat[:,t+1] = wt[:,t].*piA; 
         ft = sum(pi_mat[:,t+1]);
         if abs(ft) <= 1e-05                   
             pi_mat[1,t+1] = 1.0;   
@@ -172,7 +176,7 @@ function get_weights!(
 ) where {N <: Real} 
 
     pa = (2.0*pi)^(-0.5);
-    @views @inbounds for i in axes(wt,2)
+    @views @inbounds @fastmath for i in axes(wt,2)
         for j in axes(wt,1)
             wt[j,i] = pa*exp(- 0.5*( (data[i]/(σ*g_m[j]))^2 ))/(σ*g_m[j]) + 1e-16;
         end
@@ -217,7 +221,7 @@ function get_gammas!(
     kbar::Int64,
 ) where {N <: Real} 
     
-    @views @inbounds for i in axes(γ,2)
+    @views @inbounds @fastmath for i in axes(γ,2)
         if i == 1
             γ[1,1] = 1.0-(1.0-γₖ)^(1.0/(b^(kbar-1)));
         else
@@ -236,7 +240,7 @@ function get_probs!(
     kbar::Int64,
 ) where {N <: Real} 
 
-    @views @inbounds @fastmath for i in eachindex(prob)   
+    @views @inbounds for i in eachindex(prob)   
         for m = 1:kbar  
             prob[i] *= γ[(bit(i-1,m)+1), kbar+1-m];
         end
@@ -275,7 +279,7 @@ end
 
 function sum_tturbo(x::AbstractArray{T}) where {T <: Real} 
     s = zero(T)
-    @tturbo for j ∈ axes(x,2)
+    @inbounds @views @fastmath for j ∈ axes(x,2)
             for i ∈ axes(x,1)
             s += x[i,j]
         end
@@ -285,7 +289,7 @@ end
 
 function dot_tturbo(a::AbstractArray{T}, b::AbstractArray{T}) where {T <: Real}
     s = zero(T)
-    @inbounds @fastmath for i ∈ eachindex(a,b)
+    @inbounds @tturbo for i ∈ eachindex(a,b)
         s += a[i] * b[i]
     end
     s
@@ -308,11 +312,11 @@ function arma_estimate(
 
     make_closures(data,kbar,n) = θ₀ -> arma_likelihood(θ₀,data,kbar,n);
     nll = make_closures(data,kbar,n)   
-    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
-    dfc = TwiceDifferentiableConstraints(lower, upper)
-    result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
-    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
-    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
+    # df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    # dfc = TwiceDifferentiableConstraints(lower, upper)
+    # result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
+    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()), Optim.Options(g_tol=1.0e-5,iterations=500));
 
     return Optim.minimizer(result)
 end
@@ -355,11 +359,11 @@ function arma_estimate(
 
     make_closures(data,kbar,n) = θ₀ -> arma_likelihood(θ₀,data,kbar,n);
     nll = make_closures(data,kbar,n)   
-    df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
-    dfc = TwiceDifferentiableConstraints(lower, upper)
-    result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
-    # df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
-    # result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
+    # df = TwiceDifferentiable(nll, θ₀; autodiff=:forward);
+    # dfc = TwiceDifferentiableConstraints(lower, upper)
+    # result = optimize(df,dfc,θ₀,IPNewton(), Optim.Options(g_tol=1.0e-6)); 
+    df = OnceDifferentiable(nll, θ₀; autodiff=:forward);
+    result = optimize(df,lower,upper,θ₀,Fminbox(LBFGS()));
 
     return Optim.minimizer(result)
 end
